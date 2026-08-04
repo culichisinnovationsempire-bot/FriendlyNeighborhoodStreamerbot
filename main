@@ -1,0 +1,524 @@
+using System;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+
+public class Script
+{
+    // ==========================================
+    // CONFIGURABLE THRESHOLDS — change these!
+    // ==========================================
+    // Milestone tiers are based on milestone COUNT (how many milestones hit)
+    // Each milestone = 25 likes by default (change NEXT_MILESTONE_STEP)
+
+    public const int NEXT_MILESTONE_STEP = 25;    // likes needed per milestone
+    public const int TIER2_THRESHOLD = 2;         // milestone #2+ = T2 (50 likes)
+    public const int TIER3_THRESHOLD = 4;          // milestone #4+ = T3 (100 likes)
+    public const int TIER4_THRESHOLD = 8;          // milestone #8+ = T4 (200 likes)
+
+    // Flash durations (ms)
+    public const int T1_FLASH_MS = 1500;
+    public const int T2_FLASH_MS = 2000;
+    public const int T3_FLASH_MS = 3000;
+    public const int T4_FLASH_MS = 4000;
+
+    // Countdown tick sound threshold (last N seconds)
+    public const int COUNTDOWN_TICK_SECONDS = 5;
+
+    // Default multiplier toggle value
+    public const int DEFAULT_MULTIPLIER = 2;
+
+    // ==========================================
+    // GLOBALS
+    // ==========================================
+    public int Likes;
+    public int Milestone;
+    public int Countdown;
+    public bool CountdownActive;
+    public int NextMilestone;
+    public int Multiplier;
+    public string StreamDate;
+    public int StreamTotalLikes;
+
+    public void Init()
+    {
+        Likes = Convert.ToInt32(Globals.Get("likes"));
+        Milestone = Convert.ToInt32(Globals.Get("milestone"));
+        Countdown = Convert.ToInt32(Globals.Get("countdown"));
+        CountdownActive = Convert.ToBoolean(Globals.Get("countdownActive"));
+        NextMilestone = Convert.ToInt32(Globals.Get("nextMilestone"));
+        if (NextMilestone == 0) NextMilestone = NEXT_MILESTONE_STEP;
+        Multiplier = Convert.ToInt32(Globals.Get("multiplier"));
+        if (Multiplier == 0) Multiplier = 1;
+        StreamDate = Globals.Get("streamDate")?.ToString() ?? DateTime.Now.ToString("yyyy-MM-dd");
+        StreamTotalLikes = Convert.ToInt32(Globals.Get("streamTotalLikes"));
+    }
+
+    public void Save()
+    {
+        Globals.Set("likes", Likes);
+        Globals.Set("milestone", Milestone);
+        Globals.Set("countdown", Countdown);
+        Globals.Set("countdownActive", CountdownActive);
+        Globals.Set("nextMilestone", NextMilestone);
+        Globals.Set("multiplier", Multiplier);
+        Globals.Set("streamDate", StreamDate);
+        Globals.Set("streamTotalLikes", StreamTotalLikes);
+    }
+
+    // ==========================================
+    // MAIN ENTRY
+    // ==========================================
+    public async Task Run()
+    {
+        Init();
+
+        // --- Per-stream tracking: reset if new day ---
+        string today = DateTime.Now.ToString("yyyy-MM-dd");
+        if (StreamDate != today)
+        {
+            StreamDate = today;
+            StreamTotalLikes = 0;
+            CPH.LogInfo($"New stream day: {today}. Total likes reset.");
+        }
+
+        string mode = Args["mode"].ToString();
+
+        switch (mode)
+        {
+            case "addLike":
+                AddLike();
+                break;
+
+            case "resetLikes":
+                ResetLikes();
+                break;
+
+            case "startCountdown":
+                StartCountdown();
+                break;
+
+            case "tickCountdown":
+                await TickCountdown();
+                break;
+
+            case "resetCountdown":
+                ResetCountdown();
+                break;
+
+            case "forceMilestone":
+                ForceMilestone();
+                break;
+
+            // --- Chat Commands ---
+            case "chatCommand":
+                HandleChatCommand();
+                break;
+
+            // --- Multiplier ---
+            case "setMultiplier":
+                SetMultiplier();
+                break;
+
+            case "toggleMultiplier":
+                ToggleMultiplier();
+                break;
+
+            // --- Countdown Presets ---
+            case "countdownPreset":
+                CountdownPreset();
+                break;
+
+            // --- Get Stats ---
+            case "getStats":
+                GetStats();
+                break;
+
+            default:
+                CPH.LogInfo($"Unknown mode: {mode}");
+                break;
+        }
+
+        Save();
+        UpdateOBS();
+    }
+
+    // ==========================================
+    // LIKE SYSTEM
+    // ==========================================
+    public void AddLike()
+    {
+        Likes += Multiplier;
+        StreamTotalLikes += Multiplier;
+
+        if (Likes >= NextMilestone)
+        {
+            HandleMilestone();
+        }
+    }
+
+    public void ResetLikes()
+    {
+        Likes = 0;
+        Milestone = 0;
+        NextMilestone = NEXT_MILESTONE_STEP;
+    }
+
+    // ==========================================
+    // MILESTONE TIER SYSTEM
+    // ==========================================
+    // Tier 1: milestone #1+ (25 likes)   — standard flash
+    // Tier 2: milestone #2+ (50 likes)   — bigger flash + sound
+    // Tier 3: milestone #4+ (100 likes)  — max flash + sound + chat
+    // Tier 4: milestone #8+ (200 likes)  — full hype mode
+    public void HandleMilestone()
+    {
+        Milestone++;
+        NextMilestone += NEXT_MILESTONE_STEP;
+
+        string tier = GetMilestoneTier(Milestone);
+        CPH.LogInfo($"Milestone {Milestone} reached! Tier: {tier}");
+
+        switch (tier)
+        {
+            case "T1":
+                CPH.ObsSetSourceVisibility("MilestoneFlash", true);
+                Task.Delay(T1_FLASH_MS).Wait();
+                CPH.ObsSetSourceVisibility("MilestoneFlash", false);
+                break;
+
+            case "T2":
+                CPH.ObsSetSourceVisibility("MilestoneFlashBig", true);
+                CPH.ObsSetSourceVisibility("MilestoneFlash", true);
+                PlaySound("milestone_t2");
+                Task.Delay(T2_FLASH_MS).Wait();
+                CPH.ObsSetSourceVisibility("MilestoneFlashBig", false);
+                CPH.ObsSetSourceVisibility("MilestoneFlash", false);
+                break;
+
+            case "T3":
+                CPH.ObsSetSourceVisibility("MilestoneFlashBig", true);
+                CPH.ObsSetSourceVisibility("MilestoneFlash", true);
+                CPH.ObsSetSourceVisibility("MilestoneFlashMax", true);
+                PlaySound("milestone_t3");
+                Task.Delay(T3_FLASH_MS).Wait();
+                CPH.ObsSetSourceVisibility("MilestoneFlashBig", false);
+                CPH.ObsSetSourceVisibility("MilestoneFlash", false);
+                CPH.ObsSetSourceVisibility("MilestoneFlashMax", false);
+                CPH.SendMessage($"🔥 MILESTONE {Milestone} HIT! We're going crazy in chat! 🔥");
+                break;
+
+            case "T4":
+                CPH.ObsSetSourceVisibility("MilestoneFlashBig", true);
+                CPH.ObsSetSourceVisibility("MilestoneFlash", true);
+                CPH.ObsSetSourceVisibility("MilestoneFlashMax", true);
+                CPH.ObsSetSourceVisibility("HypeOverlay", true);
+                PlaySound("milestone_t4");
+                Task.Delay(T4_FLASH_MS).Wait();
+                CPH.ObsSetSourceVisibility("MilestoneFlashBig", false);
+                CPH.ObsSetSourceVisibility("MilestoneFlash", false);
+                CPH.ObsSetSourceVisibility("MilestoneFlashMax", false);
+                CPH.ObsSetSourceVisibility("HypeOverlay", false);
+                CPH.SendMessage($"🚨 MILESTONE {Milestone}!!! FULL HYPE MODE ACTIVATED!!! 🚨");
+                break;
+        }
+    }
+
+    public string GetMilestoneTier(int milestoneNum)
+    {
+        if (milestoneNum >= TIER4_THRESHOLD) return "T4";
+        if (milestoneNum >= TIER3_THRESHOLD) return "T3";
+        if (milestoneNum >= TIER2_THRESHOLD) return "T2";
+        return "T1";
+    }
+
+    // ==========================================
+    // COUNTDOWN SYSTEM
+    // ==========================================
+    public void StartCountdown()
+    {
+        CountdownActive = true;
+        Countdown = Convert.ToInt32(Args["seconds"]);
+    }
+
+    public async Task TickCountdown()
+    {
+        if (!CountdownActive)
+            return;
+
+        if (Countdown > 0)
+        {
+            Countdown--;
+
+            if (Countdown <= COUNTDOWN_TICK_SECONDS && Countdown > 0)
+            {
+                PlaySound("countdown_tick");
+            }
+        }
+        else
+        {
+            CountdownActive = false;
+            CPH.ObsSetSourceVisibility("CountdownDone", true);
+            PlaySound("countdown_done");
+            await Task.Delay(2000);
+            CPH.ObsSetSourceVisibility("CountdownDone", false);
+        }
+    }
+
+    public void ResetCountdown()
+    {
+        CountdownActive = false;
+        Countdown = 0;
+    }
+
+    // --- Countdown Presets ---
+    public void CountdownPreset()
+    {
+        string preset = Args["preset"].ToString().ToLower();
+
+        switch (preset)
+        {
+            case "short":
+            case "30s":
+                CountdownActive = true;
+                Countdown = 30;
+                break;
+
+            case "medium":
+            case "1m":
+                CountdownActive = true;
+                Countdown = 60;
+                break;
+
+            case "long":
+            case "5m":
+                CountdownActive = true;
+                Countdown = 300;
+                break;
+
+            case "end":
+            case "10m":
+                CountdownActive = true;
+                Countdown = 600;
+                break;
+
+            default:
+                if (int.TryParse(preset, out int custom))
+                {
+                    CountdownActive = true;
+                    Countdown = custom;
+                }
+                else
+                {
+                    CPH.LogInfo($"Unknown countdown preset: {preset}");
+                }
+                break;
+        }
+    }
+
+    // ==========================================
+    // MANUAL MILESTONE
+    // ==========================================
+    public void ForceMilestone()
+    {
+        HandleMilestone();
+    }
+
+    // ==========================================
+    // MULTIPLIER SYSTEM
+    // ==========================================
+    public void SetMultiplier()
+    {
+        int newMult = Convert.ToInt32(Args["multiplier"]);
+        Multiplier = Math.Max(1, newMult);
+        CPH.LogInfo($"Multiplier set to {Multiplier}x");
+        CPH.SendMessage($"⚡ Like multiplier set to {Multiplier}x!");
+    }
+
+    public void ToggleMultiplier()
+    {
+        if (Multiplier > 1)
+        {
+            Multiplier = 1;
+            CPH.SendMessage("⚡ Like multiplier back to 1x (normal mode)");
+        }
+        else
+        {
+            Multiplier = DEFAULT_MULTIPLIER;
+            CPH.SendMessage($"⚡ Like multiplier ON! {DEFAULT_MULTIPLIER}x likes activated!");
+        }
+    }
+
+    // ==========================================
+    // CHAT COMMAND HANDLER
+    // ==========================================
+    public void HandleChatCommand()
+    {
+        string command = Args["command"].ToString().ToLower();
+        string argsStr = Args.ContainsKey("argsStr") ? Args["argsStr"].ToString() : "";
+        string user = Args.ContainsKey("user") ? Args["user"].ToString() : "user";
+
+        switch (command)
+        {
+            case "likes":
+                int progressPct = NextMilestone > 0 ? (Likes * 100 / NextMilestone) : 0;
+                CPH.SendMessage($"❤️ Likes: {Likes} | Milestone: {Milestone} | Next: {Likes}/{NextMilestone} ({progressPct}%) | Today: {StreamTotalLikes}");
+                break;
+
+            case "countdown":
+                if (string.IsNullOrEmpty(argsStr))
+                {
+                    CPH.SendMessage($"⏱️ Countdown: {(CountdownActive ? Countdown + "s" : "inactive")}");
+                }
+                else
+                {
+                    if (int.TryParse(argsStr, out int secs))
+                    {
+                        CountdownActive = true;
+                        Countdown = secs;
+                        CPH.SendMessage($"⏱️ Countdown started: {secs}s");
+                    }
+                }
+                break;
+
+            case "reset":
+                if (IsMod(user))
+                {
+                    ResetLikes();
+                    ResetCountdown();
+                    CPH.SendMessage("🔄 All counters reset!");
+                }
+                else
+                {
+                    CPH.SendMessage($"🚫 {user}, only mods can reset.");
+                }
+                break;
+
+            case "multiplier":
+                if (!IsMod(user))
+                {
+                    CPH.SendMessage($"🚫 {user}, only mods can change the multiplier.");
+                    break;
+                }
+                if (string.IsNullOrEmpty(argsStr))
+                {
+                    CPH.SendMessage($"⚡ Current multiplier: {Multiplier}x");
+                }
+                else if (int.TryParse(argsStr, out int mult))
+                {
+                    Multiplier = Math.Max(1, mult);
+                    CPH.SendMessage($"⚡ Multiplier set to {Multiplier}x by {user}!");
+                }
+                break;
+
+            case "preset":
+                if (!IsMod(user))
+                {
+                    CPH.SendMessage($"🚫 {user}, only mods can use presets.");
+                    break;
+                }
+                Args["preset"] = argsStr;
+                CountdownPreset();
+                CPH.SendMessage($"⏱️ Countdown preset '{argsStr}' started!");
+                break;
+
+            case "stats":
+                GetStats();
+                break;
+
+            default:
+                CPH.LogInfo($"Unknown chat command: {command}");
+                break;
+        }
+    }
+
+    // Helper: mod check
+    public bool IsMod(string user)
+    {
+        if (Args.ContainsKey("isModerator"))
+        {
+            return Convert.ToBoolean(Args["isModerator"]);
+        }
+        return user.Equals("culichi_ramos", StringComparison.OrdinalIgnoreCase) ||
+               user.Equals("streamer", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ==========================================
+    // STATS OUTPUT
+    // ==========================================
+    public void GetStats()
+    {
+        int progressPct = NextMilestone > 0 ? (Likes * 100 / NextMilestone) : 0;
+        string summary = $"📊 Stream Stats → Likes: {Likes} | Total Today: {StreamTotalLikes} | Milestone: {Milestone} | Progress: {progressPct}% | Multiplier: {Multiplier}x | Countdown: {(CountdownActive ? Countdown + "s" : "off")}";
+        CPH.SendMessage(summary);
+        CPH.LogInfo(summary);
+    }
+
+    // ==========================================
+    // SOUND ALERTS
+    // ==========================================
+    public void PlaySound(string soundKey)
+    {
+        switch (soundKey)
+        {
+            case "milestone_t2":
+                CPH.PlaySound("milestone_tier2.wav");
+                break;
+            case "milestone_t3":
+                CPH.PlaySound("milestone_tier3.wav");
+                break;
+            case "milestone_t4":
+                CPH.PlaySound("milestone_tier4.wav");
+                break;
+            case "countdown_tick":
+                CPH.PlaySound("countdown_tick.wav");
+                break;
+            case "countdown_done":
+                CPH.PlaySound("countdown_done.wav");
+                break;
+        }
+    }
+
+    // ==========================================
+    // OBS UPDATES
+    // ==========================================
+    public void UpdateOBS()
+    {
+        CPH.ObsSetText("LikesText", Likes.ToString());
+        CPH.ObsSetText("MilestoneText", Milestone.ToString());
+        CPH.ObsSetText("CountdownText", CountdownActive ? Countdown.ToString() : "—");
+
+        // Progress bar
+        int progressPct = NextMilestone > 0 ? (Likes * 100 / NextMilestone) : 0;
+        CPH.ObsSetText("ProgressText", $"{progressPct}%");
+        CPH.ObsSetText("ProgressLabel", $"{Likes}/{NextMilestone}");
+
+        // Multiplier badge
+        if (Multiplier > 1)
+        {
+            CPH.ObsSetText("MultiplierText", $"{Multiplier}x");
+            CPH.ObsSetSourceVisibility("MultiplierBadge", true);
+        }
+        else
+        {
+            CPH.ObsSetSourceVisibility("MultiplierBadge", false);
+        }
+
+        // Stream total
+        CPH.ObsSetText("StreamTotalText", StreamTotalLikes.ToString());
+
+        // Progress bar visibility
+        if (progressPct > 0 && progressPct < 100)
+        {
+            CPH.ObsSetSourceVisibility("ProgressBar", true);
+        }
+        else if (progressPct >= 100)
+        {
+            CPH.ObsSetSourceVisibility("ProgressBar", true);
+            CPH.ObsSetText("ProgressText", "MAX");
+        }
+        else
+        {
+            CPH.ObsSetSourceVisibility("ProgressBar", false);
+        }
+    }
+}
